@@ -130,3 +130,8 @@ fig.add_trace(go.Scatter(x=pred_backtest.index, y=pred_backtest['MontoNeto'], na
 fig.add_trace(go.Scatter(x=proyeccion_futura.index, y=proyeccion_futura['MontoNeto'], name='Proyección Futura', line=dict(color='red', width=3)))
 fig.update_layout(template="plotly_white", hovermode="x unified", title="Backtest y Proyección Ventas")
 fig.show()
+
+import pickle
+with open ("modelo.pkl","wb") as f:
+        pickle.dump(model_final,f)
+
