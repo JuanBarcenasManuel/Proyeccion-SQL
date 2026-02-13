@@ -15,7 +15,7 @@ st.set_page_config(
     page_icon="🛒"
 )
 
-# Estilo visual para las tarjetas de métricas
+# Estilo visual personalizado
 st.markdown("""
     <style>
     .stMetric { 
@@ -25,6 +25,7 @@ st.markdown("""
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         border: 1px solid #eee;
     }
+    .main { background-color: #f8f9fa; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -34,42 +35,55 @@ UID, PWD = "Jbarcenas", "Juanbarcenas2020"
 DB_PRINCIPAL = "EnterpriseAdminDb"
 
 ruta_base = os.path.dirname(__file__)
-# Asegúrate de que este nombre coincida con tu archivo de imagen
 ruta_logo = os.path.join(ruta_base, 'image_ce2f2b.png') 
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def get_historical_data():
-    """Extrae datos reales de SQL Server"""
-    conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={SERVER};DATABASE={DB_PRINCIPAL};UID={UID};PWD={PWD};Encrypt=no;TrustServerCertificate=yes;"
-    engine = create_engine(f"mssql+pyodbc:///?odbc_connect={quote_plus(conn_str)}")
-    
-    SQL = text(f"""
-        SELECT I.FechaE, 
-               TRY_CONVERT(float, I.Cantidad) * TRY_CONVERT(float, I.Precio) AS MontoNeto 
-        FROM [{DB_PRINCIPAL}].[dbo].[SAITEMFAC] AS I 
-        WHERE I.TipoFac = 'A' AND I.FechaE >= '2025-01-01'
-    """)
-    
-    with engine.connect() as conn:
-        df = pd.read_sql(SQL, conn, parse_dates=["FechaE"])
-    
-    df["FechaE"] = pd.to_datetime(df["FechaE"]).dt.normalize()
-    pw_clean = df.groupby("FechaE")["MontoNeto"].sum().to_frame()
-    # Resample para asegurar que no falten días (rellena con 0)
-    return pw_clean.resample('D').asfreq().fillna(0)
+    """Extrae datos reales de SQL Server con manejo de errores"""
+    try:
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={SERVER};DATABASE={DB_PRINCIPAL};"
+            f"UID={UID};PWD={PWD};Encrypt=no;TrustServerCertificate=yes;"
+            f"Connection Timeout=30;"
+        )
+        engine = create_engine(f"mssql+pyodbc:///?odbc_connect={quote_plus(conn_str)}")
+        
+        SQL = text(f"""
+            SELECT I.FechaE, 
+                   TRY_CONVERT(float, I.Cantidad) * TRY_CONVERT(float, I.Precio) AS MontoNeto 
+            FROM [{DB_PRINCIPAL}].[dbo].[SAITEMFAC] AS I 
+            WHERE I.TipoFac = 'A' AND I.FechaE >= '2025-01-01'
+        """)
+        
+        with engine.connect() as conn:
+            df = pd.read_sql(SQL, conn, parse_dates=["FechaE"])
+        
+        if df.empty:
+            return None
+
+        df["FechaE"] = pd.to_datetime(df["FechaE"]).dt.normalize()
+        pw_clean = df.groupby("FechaE")["MontoNeto"].sum().to_frame()
+        return pw_clean.resample('D').asfreq().fillna(0)
+    except Exception as e:
+        st.sidebar.error(f"Error de conexión SQL: {e}")
+        return None
 
 @st.cache_resource
 def load_model():
     """Carga el modelo XGBoost guardado (.json)"""
     ruta_modelo = os.path.join(ruta_base, 'modelo_ventas.json')
     if os.path.exists(ruta_modelo):
-        model = xgb.XGBRegressor()
-        model.load_model(ruta_modelo)
-        return model
+        try:
+            model = xgb.XGBRegressor()
+            model.load_model(ruta_modelo)
+            return model
+        except Exception as e:
+            st.error(f"Error al cargar el modelo: {e}")
     return None
 
 def create_features(df):
-    """Ingeniería de variables idéntica al entrenamiento"""
+    """Ingeniería de variables para la predicción recursiva"""
     df = df.copy()
     df['dia_semana'] = df.index.dayofweek
     df['dia_mes']    = df.index.day
@@ -92,78 +106,69 @@ with col_logo:
 
 with col_titulo:
     st.title("Sistema de Proyección de Demanda")
-    st.write("Análisis dinámico basado en historial de SQL Server y XGBoost")
+    st.write("Análisis dinámico | Departamento de Cadenas de Suministros")
 
 st.markdown("---")
 
 # --- 4. BARRA LATERAL (SIDEBAR) ---
 with st.sidebar:
     st.header("⚙️ Configuración")
-    # Fecha desde la cual comenzará la proyección de 30 días
     fecha_inicio = st.date_input("Proyectar 30 días desde:", datetime.now())
     st.divider()
-    btn_calcular = st.button(" Sincronizar y Calcular", use_container_width=True)
-    st.info("Se consultará el SQL Server para obtener los datos más recientes.")
+    btn_calcular = st.button("🚀 Sincronizar y Calcular", use_container_width=True)
+    st.info("La proyección utiliza un modelo XGBoost con lógica de cascada recursiva.")
 
-# --- 5. LÓGICA DE PROYECCIÓN (CASCADA RECURSIVA) ---
-# Carga inicial de datos y modelo
+# --- 5. LÓGICA DE PROYECCIÓN ---
 pw_clean = get_historical_data()
 model = load_model()
 
 if btn_calcular:
-    if model is not None:
-        with st.spinner("Calculando proyección..."):
-            # Copiamos el historial para ir agregando las predicciones
+    if pw_clean is None:
+        st.error("No se pudo conectar a la base de datos local. Verifique la VPN o conexión de red.")
+    elif model is None:
+        st.error("Archivo 'modelo_ventas.json' no encontrado en el servidor.")
+    else:
+        with st.spinner("Procesando datos y generando proyección..."):
             df_loop = pw_clean.copy()
             features_cols = ['dia_semana', 'dia_mes', 'mes', 'es_finde', 'lag_1', 'lag_2', 'lag_7', 'lag_14', 'rolling_mean_7']
             results = []
             
-            # Bucle de 30 días
             current_date = pd.Timestamp(fecha_inicio)
             
+            # Bucle de 30 días
             for _ in range(30):
-                # 1. Crear la fila para la fecha actual (inicialmente en 0)
                 df_loop.loc[current_date, 'MontoNeto'] = 0
-                
-                # 2. Generar las variables (lags y rolling mean) basadas en el historial + predicciones previas
                 df_with_features = create_features(df_loop)
                 
-                # 3. Seleccionar solo la fila que vamos a predecir
+                # Seleccionar fila actual para predecir
                 X_input = df_with_features.loc[[current_date], features_cols]
                 
-                # 4. Realizar la predicción
-                pred = model.predict(X_input)[0]
-                pred = max(0, float(pred)) # Evitar ventas negativas
+                # Predicción y limpieza
+                pred = max(0, float(model.predict(X_input)[0]))
                 
-                # 5. Actualizar el DataFrame de trabajo con la predicción (para el siguiente lag)
+                # Alimentar el bucle para el siguiente lag
                 df_loop.loc[current_date, 'MontoNeto'] = pred
                 
-                # 6. Guardar en la lista de resultados
                 results.append({
                     'Fecha': current_date.strftime('%Y-%m-%d'),
-                    'Día': current_date.day_name(),
+                    'Día': current_date.day_name(locale='es_ES'),
                     'Venta Proyectada': pred
                 })
-                
-                # Avanzar al siguiente día
                 current_date += timedelta(days=1)
             
-            # Convertir resultados a DataFrame
             df_res = pd.DataFrame(results)
             total_30d = df_res['Venta Proyectada'].sum()
 
-            # --- 6. VISUALIZACIÓN DE RESULTADOS ---
+            # --- 6. VISUALIZACIÓN ---
             m1, m2, m3 = st.columns(3)
             with m1:
-                st.metric("💰 TOTAL PROYECTADO (30 DÍAS)", f"${total_30d:,.2f}")
+                st.metric("💰 TOTAL PROYECTADO", f"${total_30d:,.2f}")
             with m2:
-                st.metric("📅 INICIO DE PROYECCIÓN", fecha_inicio.strftime('%d/%m/%Y'))
+                st.metric("📅 FECHA INICIO", fecha_inicio.strftime('%d/%m/%Y'))
             with m3:
-                promedio = total_30d / 30
-                st.metric("📊 PROMEDIO DIARIO", f"${promedio:,.2f}")
+                st.metric("📊 PROMEDIO DIARIO", f"${(total_30d/30):,.2f}")
 
-            # Gráfico de tendencia
-            st.subheader("📈 Tendencia de Ventas Proyectada")
+            # Gráfico Plotly
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=df_res['Fecha'], 
@@ -172,13 +177,18 @@ if btn_calcular:
                 line=dict(color='#FF4B4B', width=3),
                 fill='tozeroy',
                 fillcolor='rgba(255, 75, 75, 0.1)',
-                name="Venta"
+                name="Venta Est."
             ))
-            fig.update_layout(template="plotly_white", xaxis_title="Fecha", yaxis_title="Monto ($)")
+            fig.update_layout(
+                template="plotly_white", 
+                title="Pronóstico de Ventas (Próximos 30 Días)",
+                xaxis_title="Fecha",
+                yaxis_title="Monto ($)"
+            )
             st.plotly_chart(fig, use_container_width=True)
 
-            # Tabla Detallada con formato y gradiente
-            st.subheader("📋 Detalle de Ventas Diarias")
+            # Tabla de detalles
+            st.subheader("📋 Detalle Diario de Proyección")
             st.dataframe(
                 df_res.style.background_gradient(subset=['Venta Proyectada'], cmap='Oranges')
                 .format({'Venta Proyectada': '${:,.2f}'}),
@@ -186,19 +196,18 @@ if btn_calcular:
                 height=450
             )
             
-            # Botón de descarga
+            # Exportación
+            csv = df_res.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Descargar Reporte (CSV)",
-                data=df_res.to_csv(index=False).encode('utf-8'),
-                file_name=f"proyeccion_suministros_{fecha_inicio}.csv",
-                mime="text/csv",
+                "📥 Descargar Reporte CSV",
+                csv,
+                f"proyeccion_{fecha_inicio}.csv",
+                "text/csv",
                 use_container_width=True
             )
-    else:
-        st.error("❌ No se encontró el archivo 'modelo_ventas.json'. Por favor, verifica que el modelo esté en la misma carpeta que este script.")
 else:
-    st.info("💡 Selecciona una fecha en el calendario y presiona el botón 'Sincronizar y Calcular' para generar la proyección de 30 días.")
+    st.info("Seleccione la fecha de inicio en el panel izquierdo para calcular el pronóstico de demanda.")
 
 # --- 7. PIE DE PÁGINA ---
 st.divider()
-st.caption(f"© {datetime.now().year}  Suministros | Proyección de Demanda ")
+st.caption(f"© {datetime.now().year} Suministros 1979 C.A. | Planificación de la Demanda | XGBoost v2.1")
