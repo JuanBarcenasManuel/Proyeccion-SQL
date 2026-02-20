@@ -34,19 +34,16 @@ ruta_modelo = os.path.join(ruta_base, 'modelo_ventas.json')
 
 @st.cache_data
 def get_historical_data():
-    """Carga los datos desde el CSV generado por el extractor"""
     if os.path.exists(ruta_datos):
         df = pd.read_csv(ruta_datos)
         df["FechaE"] = pd.to_datetime(df["FechaE"])
         df = df.set_index("FechaE")
-        # Aseguramos frecuencia diaria y llenamos huecos con 0
         df = df.resample('D').asfreq().fillna(0)
         return df
     return None
 
 @st.cache_resource
 def load_model():
-    """Carga el modelo XGBoost guardado"""
     if os.path.exists(ruta_modelo):
         model = xgb.XGBRegressor()
         model.load_model(ruta_modelo)
@@ -54,16 +51,13 @@ def load_model():
     return None
 
 def create_features(df):
-    """Ingeniería de variables para el modelo"""
     df = df.copy()
     df['dia_semana'] = df.index.dayofweek
     df['dia_mes']    = df.index.day
     df['mes']        = df.index.month
     df['es_finde']   = df['dia_semana'].isin([5, 6]).astype(int)
-    
     for lag in [1, 2, 7, 14]:
         df[f'lag_{lag}'] = df['MontoNeto'].shift(lag)
-    
     df['rolling_mean_7'] = df['MontoNeto'].shift(1).rolling(window=7).mean()
     return df
 
@@ -89,15 +83,12 @@ model = load_model()
 with st.sidebar:
     st.header("⚙️ Configuración")
     fecha_inicio = st.date_input("Proyectar 30 días desde:", datetime.now())
-    
     st.divider()
-    
     if pw_clean is not None:
         ultima_fecha = pw_clean.index.max().strftime('%d/%m/%Y')
         st.success(f"✅ Datos cargados hasta: {ultima_fecha}")
     else:
         st.error("❌ No se encontró 'ventas_historicas.csv'")
-    
     btn_calcular = st.button("🚀 Calcular Proyección", use_container_width=True)
 
 # --- 6. LÓGICA DE PROYECCIÓN ---
@@ -107,35 +98,36 @@ if btn_calcular:
             df_loop = pw_clean.copy()
             features_cols = ['dia_semana', 'dia_mes', 'mes', 'es_finde', 'lag_1', 'lag_2', 'lag_7', 'lag_14', 'rolling_mean_7']
             results = []
-            
             current_date = pd.Timestamp(fecha_inicio)
             
             for _ in range(30):
-                # 1. Crear fila temporal
                 df_loop.loc[current_date, 'MontoNeto'] = 0
-                
-                # 2. Generar variables
                 df_with_features = create_features(df_loop)
-                
-                # 3. Preparar input (última fila)
                 X_input = df_with_features.loc[[current_date], features_cols]
-                
-                # 4. Predicción
                 pred = model.predict(X_input)[0]
                 pred = max(0, float(pred)) 
-                
-                # 5. Actualizar historial para el siguiente ciclo
                 df_loop.loc[current_date, 'MontoNeto'] = pred
-                
                 results.append({
                     'Fecha': current_date.strftime('%Y-%m-%d'),
-                    'Día': current_date.day_name(),
                     'Venta Proyectada': pred
                 })
                 current_date += timedelta(days=1)
             
             df_res = pd.DataFrame(results)
             total_30d = df_res['Venta Proyectada'].sum()
+
+            # --- LÓGICA PERCENTIL Q1 (Tu fórmula de Power BI adaptada) ---
+            ventas_positivas = df_res[df_res['Venta Proyectada'] > 0]['Venta Proyectada']
+            if len(ventas_positivas) >= 3:
+                q1 = np.percentile(ventas_positivas, 25) # Percentile EXC aproximado
+            elif len(ventas_positivas) > 0:
+                q1 = np.percentile(ventas_positivas, 25) # Percentile INC
+            else:
+                q1 = 0
+            
+            # Filtramos solo los días que están sobre el Q1 para el promedio
+            sobre_q1 = ventas_positivas[ventas_positivas > q1]
+            promedio_ajustado = sobre_q1.mean() if not sobre_q1.empty else 0
 
             # --- VISUALIZACIÓN ---
             m1, m2, m3 = st.columns(3)
@@ -144,49 +136,27 @@ if btn_calcular:
             with m2:
                 st.metric("📅 PERIODO", "30 Días")
             with m3:
-                promedio = total_30d / 30
-                st.metric("📊 PROM. DIARIO", f"${promedio:,.2f}")
+                # Ahora mostramos el promedio inteligente (DQ)
+                st.metric("📊 PROM. DIARIO (Q1)", f"${promedio_ajustado:,.2f}", help="Promedio de días que superan el percentil 25, eliminando valles de fin de semana.")
 
-            # Gráfico Plotly
+            # Gráfico
             fig = go.Figure()
             fig.add_trace(go.Scatter(
-                x=df_res['Fecha'], 
-                y=df_res['Venta Proyectada'],
-                mode='lines+markers',
-                line=dict(color='#FF4B4B', width=3),
-                fill='tozeroy',
-                fillcolor='rgba(255, 75, 75, 0.1)',
-                name="Proyección"
+                x=df_res['Fecha'], y=df_res['Venta Proyectada'],
+                mode='lines+markers', line=dict(color='#FF4B4B', width=3),
+                fill='tozeroy', fillcolor='rgba(255, 75, 75, 0.1)', name="Proyección"
             ))
-            fig.update_layout(
-                title="Tendencia de Demanda Proyectada",
-                template="plotly_white", 
-                xaxis_title="Fecha", 
-                yaxis_title="Monto ($)"
-            )
+            fig.update_layout(template="plotly_white", xaxis_title="Fecha", yaxis_title="Monto ($)")
             st.plotly_chart(fig, use_container_width=True)
 
-            # Tabla (Ajustada para compatibilidad con Pandas Styler)
             st.subheader("📋 Detalle Diario")
-            st.dataframe(
-                df_res.style.format({'Venta Proyectada': '${:,.2f}'}),
-                use_container_width=True
-            )
+            st.dataframe(df_res.style.format({'Venta Proyectada': '${:,.2f}'}), use_container_width=True)
             
-            # Descarga
-            st.download_button(
-                label="📥 Descargar Reporte (CSV)",
-                data=df_res.to_csv(index=False).encode('utf-8'),
-                file_name=f"proyeccion_{fecha_inicio}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            st.download_button(label="📥 Descargar Reporte (CSV)", data=df_res.to_csv(index=False).encode('utf-8'), file_name=f"proyeccion_{fecha_inicio}.csv", mime="text/csv", use_container_width=True)
     else:
-        st.error("Error: Verifica que el modelo (.json) y los datos (.csv) estén en GitHub.")
-
+        st.error("Error: Verifica archivos en GitHub.")
 else:
-    st.info("💡 Selecciona una fecha y presiona el botón para iniciar la proyección.")
+    st.info("💡 Selecciona una fecha y presiona el botón para iniciar.")
 
-# --- 7. PIE DE PÁGINA ---
 st.divider()
 st.caption(f"© {datetime.now().year} | Suministros 1979 C.A.")
