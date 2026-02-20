@@ -3,5 +3,4 @@ pandas
 numpy
 xgboost
 plotly
-scipy
-
+scikit-learn
