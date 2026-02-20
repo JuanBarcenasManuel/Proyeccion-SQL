@@ -3,5 +3,5 @@ pandas
 numpy
 xgboost
 plotly
-sqlalchemy
-pyodbc
+scipy
+
