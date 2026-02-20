@@ -38,6 +38,7 @@ def get_historical_data():
         df = pd.read_csv(ruta_datos)
         df["FechaE"] = pd.to_datetime(df["FechaE"])
         df = df.set_index("FechaE")
+        df = df.sort_index()
         df = df.resample('D').asfreq().fillna(0)
         return df
     return None
@@ -82,23 +83,35 @@ model = load_model()
 # --- 5. BARRA LATERAL (SIDEBAR) ---
 with st.sidebar:
     st.header("⚙️ Configuración")
-    fecha_inicio = st.date_input("Proyectar 30 días desde:", datetime.now())
+    # Fecha de inicio para la proyección
+    fecha_inicio_proy = st.date_input("Proyectar 30 días desde:", datetime.now())
+    
     st.divider()
+    
     if pw_clean is not None:
-        ultima_fecha = pw_clean.index.max().strftime('%d/%m/%Y')
-        st.success(f"✅ Datos cargados hasta: {ultima_fecha}")
+        ultima_fecha_data = pw_clean.index.max()
+        st.success(f"✅ Datos cargados hasta: {ultima_fecha_data.strftime('%d/%m/%Y')}")
     else:
         st.error("❌ No se encontró 'ventas_historicas.csv'")
+    
     btn_calcular = st.button("🚀 Calcular Proyección", use_container_width=True)
 
-# --- 6. LÓGICA DE PROYECCIÓN ---
+# --- 6. LÓGICA DE PROYECCIÓN Y MÉTRICAS ---
 if btn_calcular:
     if model is not None and pw_clean is not None:
-        with st.spinner("Generando proyección para los próximos 30 días..."):
+        with st.spinner("Procesando datos..."):
+            
+            # --- CÁLCULO DE VENTA ACUMULADA (HISTÓRICA) ---
+            # Desde la fecha seleccionada en el calendario hasta el fin de la data actual
+            fecha_inicio_dt = pd.to_datetime(fecha_inicio_proy)
+            mask_acumulado = (pw_clean.index >= fecha_inicio_dt) & (pw_clean.index <= ultima_fecha_data)
+            venta_acumulada_real = pw_clean.loc[mask_acumulado, 'MontoNeto'].sum()
+
+            # --- GENERACIÓN DE PROYECCIÓN (FUTURO) ---
             df_loop = pw_clean.copy()
             features_cols = ['dia_semana', 'dia_mes', 'mes', 'es_finde', 'lag_1', 'lag_2', 'lag_7', 'lag_14', 'rolling_mean_7']
             results = []
-            current_date = pd.Timestamp(fecha_inicio)
+            current_date = pd.Timestamp(fecha_inicio_proy)
             
             for _ in range(30):
                 df_loop.loc[current_date, 'MontoNeto'] = 0
@@ -114,32 +127,29 @@ if btn_calcular:
                 current_date += timedelta(days=1)
             
             df_res = pd.DataFrame(results)
-            total_30d = df_res['Venta Proyectada'].sum()
+            total_30d_proy = df_res['Venta Proyectada'].sum()
 
-            # --- LÓGICA PERCENTIL Q1 (Tu fórmula de Power BI adaptada) ---
+            # --- LÓGICA PROMEDIO Q1 ---
             ventas_positivas = df_res[df_res['Venta Proyectada'] > 0]['Venta Proyectada']
-            if len(ventas_positivas) >= 3:
-                q1 = np.percentile(ventas_positivas, 25) # Percentile EXC aproximado
-            elif len(ventas_positivas) > 0:
-                q1 = np.percentile(ventas_positivas, 25) # Percentile INC
-            else:
-                q1 = 0
-            
-            # Filtramos solo los días que están sobre el Q1 para el promedio
+            q1 = np.percentile(ventas_positivas, 25) if not ventas_positivas.empty else 0
             sobre_q1 = ventas_positivas[ventas_positivas > q1]
             promedio_ajustado = sobre_q1.mean() if not sobre_q1.empty else 0
 
-            # --- VISUALIZACIÓN ---
-            m1, m2, m3 = st.columns(3)
+            # --- VISUALIZACIÓN DE MÉTRICAS (4 COLUMNAS) ---
+            m1, m2, m3, m4 = st.columns(4)
             with m1:
-                st.metric("💰 TOTAL PROYECTADO", f"${total_30d:,.2f}")
+                st.metric("📈 VENTA ACUMULADA", f"${venta_acumulada_real:,.2f}", 
+                          help=f"Total real desde {fecha_inicio_proy.strftime('%d/%m')} hasta {ultima_fecha_data.strftime('%d/%m')}")
             with m2:
-                st.metric("📅 PERIODO", "30 Días")
+                st.metric("💰 TOTAL PROYECTADO", f"${total_30d_proy:,.2f}", 
+                          help="Suma de la predicción para los próximos 30 días.")
             with m3:
-                # Ahora mostramos el promedio inteligente (DQ)
-                st.metric("📊 PROM. DIARIO (Q1)", f"${promedio_ajustado:,.2f}", help="Promedio de días que superan el percentil 25, eliminando valles de fin de semana.")
+                st.metric("📅 PERIODO", "30 Días")
+            with m4:
+                st.metric("📊 PROM. DIARIO (Q1)", f"${promedio_ajustado:,.2f}", 
+                          help="Promedio inteligente de los días proyectados sobre el percentil 25.")
 
-            # Gráfico
+            # Gráfico de tendencia
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=df_res['Fecha'], y=df_res['Venta Proyectada'],
@@ -149,14 +159,13 @@ if btn_calcular:
             fig.update_layout(template="plotly_white", xaxis_title="Fecha", yaxis_title="Monto ($)")
             st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("📋 Detalle Diario")
+            st.subheader("📋 Detalle Diario Proyectado")
             st.dataframe(df_res.style.format({'Venta Proyectada': '${:,.2f}'}), use_container_width=True)
             
-            st.download_button(label="📥 Descargar Reporte (CSV)", data=df_res.to_csv(index=False).encode('utf-8'), file_name=f"proyeccion_{fecha_inicio}.csv", mime="text/csv", use_container_width=True)
     else:
-        st.error("Error: Verifica archivos en GitHub.")
+        st.error("Error: Revisa los archivos de datos y modelo en GitHub.")
 else:
-    st.info("💡 Selecciona una fecha y presiona el botón para iniciar.")
+    st.info("💡 Selecciona una fecha y presiona el botón para calcular.")
 
 st.divider()
 st.caption(f"© {datetime.now().year} | Suministros 1979 C.A.")
