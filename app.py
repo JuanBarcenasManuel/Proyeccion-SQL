@@ -34,16 +34,19 @@ ruta_modelo = os.path.join(ruta_base, 'modelo_ventas.json')
 
 @st.cache_data
 def get_historical_data():
+    """Carga los datos desde el CSV generado por el extractor"""
     if os.path.exists(ruta_datos):
         df = pd.read_csv(ruta_datos)
         df["FechaE"] = pd.to_datetime(df["FechaE"])
         df = df.set_index("FechaE")
+        # Aseguramos frecuencia diaria y llenamos huecos con 0
         df = df.resample('D').asfreq().fillna(0)
         return df
     return None
 
 @st.cache_resource
 def load_model():
+    """Carga el modelo XGBoost guardado"""
     if os.path.exists(ruta_modelo):
         model = xgb.XGBRegressor()
         model.load_model(ruta_modelo)
@@ -51,17 +54,20 @@ def load_model():
     return None
 
 def create_features(df):
+    """Ingeniería de variables para el modelo"""
     df = df.copy()
     df['dia_semana'] = df.index.dayofweek
     df['dia_mes']    = df.index.day
     df['mes']        = df.index.month
     df['es_finde']   = df['dia_semana'].isin([5, 6]).astype(int)
+    
     for lag in [1, 2, 7, 14]:
         df[f'lag_{lag}'] = df['MontoNeto'].shift(lag)
+    
     df['rolling_mean_7'] = df['MontoNeto'].shift(1).rolling(window=7).mean()
     return df
 
-# --- 3. ENCABEZADO ---
+# --- 3. ENCABEZADO Y LOGO ---
 col_logo, col_titulo = st.columns([1, 4])
 with col_logo:
     if os.path.exists(ruta_logo):
@@ -71,11 +77,11 @@ with col_logo:
 
 with col_titulo:
     st.title("Sistema de Proyección de Demanda")
-    st.write("Predicción Ventas | Departamento de Cadenas de Suministros")
+    st.write("Predicción Ventas | Suministros 1979 C.A.")
 
 st.markdown("---")
 
-# --- 4. CARGA DE DATOS Y MODELO ---
+# --- 4. CARGA DE RECURSOS ---
 pw_clean = get_historical_data()
 model = load_model()
 
@@ -83,33 +89,44 @@ model = load_model()
 with st.sidebar:
     st.header("⚙️ Configuración")
     fecha_inicio = st.date_input("Proyectar 30 días desde:", datetime.now())
+    
     st.divider()
+    
     if pw_clean is not None:
         ultima_fecha = pw_clean.index.max().strftime('%d/%m/%Y')
         st.success(f"✅ Datos cargados hasta: {ultima_fecha}")
     else:
         st.error("❌ No se encontró 'ventas_historicas.csv'")
+    
     btn_calcular = st.button("🚀 Calcular Proyección", use_container_width=True)
 
 # --- 6. LÓGICA DE PROYECCIÓN ---
 if btn_calcular:
     if model is not None and pw_clean is not None:
-        # AQUÍ ESTABA EL ERROR DE SANGRÍA, ESTE BLOQUE DEBE ESTAR IDENTADO:
         with st.spinner("Generando proyección para los próximos 30 días..."):
             df_loop = pw_clean.copy()
             features_cols = ['dia_semana', 'dia_mes', 'mes', 'es_finde', 'lag_1', 'lag_2', 'lag_7', 'lag_14', 'rolling_mean_7']
             results = []
+            
             current_date = pd.Timestamp(fecha_inicio)
             
             for _ in range(30):
+                # 1. Crear fila temporal
                 df_loop.loc[current_date, 'MontoNeto'] = 0
+                
+                # 2. Generar variables
                 df_with_features = create_features(df_loop)
+                
+                # 3. Preparar input (última fila)
                 X_input = df_with_features.loc[[current_date], features_cols]
                 
+                # 4. Predicción
                 pred = model.predict(X_input)[0]
-                pred = max(0, float(pred))
+                pred = max(0, float(pred)) 
                 
+                # 5. Actualizar historial para el siguiente ciclo
                 df_loop.loc[current_date, 'MontoNeto'] = pred
+                
                 results.append({
                     'Fecha': current_date.strftime('%Y-%m-%d'),
                     'Día': current_date.day_name(),
@@ -130,23 +147,46 @@ if btn_calcular:
                 promedio = total_30d / 30
                 st.metric("📊 PROM. DIARIO", f"${promedio:,.2f}")
 
+            # Gráfico Plotly
             fig = go.Figure()
             fig.add_trace(go.Scatter(
-                x=df_res['Fecha'], y=df_res['Venta Proyectada'],
-                mode='lines+markers', line=dict(color='#FF4B4B', width=3),
-                fill='tozeroy', fillcolor='rgba(255, 75, 75, 0.1)', name="Proyección"
+                x=df_res['Fecha'], 
+                y=df_res['Venta Proyectada'],
+                mode='lines+markers',
+                line=dict(color='#FF4B4B', width=3),
+                fill='tozeroy',
+                fillcolor='rgba(255, 75, 75, 0.1)',
+                name="Proyección"
             ))
-            fig.update_layout(template="plotly_white", xaxis_title="Fecha", yaxis_title="Monto ($)")
+            fig.update_layout(
+                title="Tendencia de Demanda Proyectada",
+                template="plotly_white", 
+                xaxis_title="Fecha", 
+                yaxis_title="Monto ($)"
+            )
             st.plotly_chart(fig, use_container_width=True)
 
+            # Tabla (Ajustada para compatibilidad con Pandas Styler)
             st.subheader("📋 Detalle Diario")
-            st.dataframe(df_res.style.background_gradient(subset=['Venta Proyectada'], cmap='Oranges').format({'Venta Proyectada': '${:,.2f}'}), use_container_width=True)
+            st.dataframe(
+                df_res.style.format({'Venta Proyectada': '${:,.2f}'}),
+                use_container_width=True
+            )
             
-            st.download_button(label="📥 Descargar Reporte (CSV)", data=df_res.to_csv(index=False).encode('utf-8'), file_name=f"proyeccion_{fecha_inicio}.csv", mime="text/csv", use_container_width=True)
+            # Descarga
+            st.download_button(
+                label="📥 Descargar Reporte (CSV)",
+                data=df_res.to_csv(index=False).encode('utf-8'),
+                file_name=f"proyeccion_{fecha_inicio}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
     else:
-        st.error("Error: Revisa los archivos en GitHub.")
-else:
-    st.info("💡 Selecciona una fecha y presiona el botón para iniciar.")
+        st.error("Error: Verifica que el modelo (.json) y los datos (.csv) estén en GitHub.")
 
+else:
+    st.info("💡 Selecciona una fecha y presiona el botón para iniciar la proyección.")
+
+# --- 7. PIE DE PÁGINA ---
 st.divider()
 st.caption(f"© {datetime.now().year} | Suministros 1979 C.A.")
