@@ -4,4 +4,6 @@ numpy
 xgboost
 plotly
 scikit-learn
+jinja2
+
 
