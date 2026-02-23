@@ -1,1 +1,2 @@
-libomp-dev
+unixodbc-dev
+freetds-dev
