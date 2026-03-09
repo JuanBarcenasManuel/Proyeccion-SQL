@@ -6,11 +6,15 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
 
+# 1. Cargamos la imagen desde la carpeta local del proyecto
+# Nota: Según tu captura, el archivo es un .jpg
+logo = Image.open("Suministros.jpg")
+
 # --- 1. CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
     page_title="Predicción Ventas | Suministros 1979 C.A.",
     layout="wide", 
-    page_icon="🛒"
+    page_icon=logo  # Aquí ya usamos la variable con la imagen cargada
 )
 
 # Estilo visual para las tarjetas de métricas
@@ -169,3 +173,4 @@ else:
 
 st.divider()
 st.caption(f"© {datetime.now().year} | Suministros 1979 C.A.")
+
