@@ -5,6 +5,7 @@ import xgboost as xgb
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
+from PIL import Image
 
 logo = Image.open("Suministros.jpg")
 
@@ -170,5 +171,6 @@ else:
 
 st.divider()
 st.caption(f"© {datetime.now().year} | Suministros 1979 C.A.")
+
 
 
