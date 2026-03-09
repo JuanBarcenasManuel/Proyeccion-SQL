@@ -7,20 +7,16 @@ from datetime import datetime, timedelta
 import os
 from PIL import Image
 
-# --- 1. CONFIGURACIÓN Y LOGO ---
+# --- 1. CONFIGURACIÓN DE PÁGINA (DEBE SER LO PRIMERO) ---
+st.set_page_config(
+    page_title="Predicción Ventas | Suministros 1979",
+    layout="wide"
+)
+
+# Definición de rutas relativas para GitHub/Streamlit Cloud
 ruta_base = os.path.dirname(__file__)
 ruta_logo = os.path.join(ruta_base, 'Suministros.jpg')
-
-try:
-    logo = Image.open(ruta_logo)
-except:
-    logo = "📦"
-
-st.set_page_config(
-    page_title="Predicción Ventas | Suministros 1979 C.A.",
-    layout="wide", 
-    page_icon=logo
-)
+ruta_datos = os.path.join(ruta_base, 'ventas_historicas.csv')
 
 # Estilo visual para las tarjetas de métricas
 st.markdown("""
@@ -35,17 +31,16 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. RUTAS DE ARCHIVOS ---
-ruta_datos = os.path.join(ruta_base, 'ventas_historicas.csv')
-
+# --- 2. FUNCIONES DE PROCESAMIENTO ---
 @st.cache_data
 def get_historical_data():
     if os.path.exists(ruta_datos):
         df = pd.read_csv(ruta_datos)
         df["FechaE"] = pd.to_datetime(df["FechaE"])
-        # Agrupamos por día para asegurar venta total diaria
+        # Agrupamos por día para consolidar la venta total de la empresa
         df = df.groupby("FechaE")["MontoNeto"].sum().reset_index()
         df = df.set_index("FechaE").sort_index()
+        # Rellenamos días sin venta con 0 para mantener la cronología
         df = df.resample('D').asfreq().fillna(0)
         return df
     return None
@@ -56,8 +51,8 @@ def create_features(df):
     df['dia_mes']    = df.index.day
     df['mes']        = df.index.month
     df['es_finde']   = df['dia_semana'].isin([5, 6]).astype(int)
-    # Lags para captar tendencia reciente
-    for lag in [1, 7, 14, 30]:
+    # Lags clave para detectar ciclos semanales y mensuales
+    for lag in [1, 7, 30]:
         df[f'lag_{lag}'] = df['MontoNeto'].shift(lag)
     df['rolling_mean_7'] = df['MontoNeto'].shift(1).rolling(window=7).mean()
     return df
@@ -72,101 +67,97 @@ with col_logo:
 
 with col_titulo:
     st.title("Sistema de Proyección de Demanda")
-    st.write("Predicción Ventas Reales | Suministros 1979 C.A.")
+    st.write("Suministros 1979 C.A. | Planificación y Presupuesto")
 
 st.markdown("---")
 
-# --- 4. CARGA DE RECURSOS ---
+# --- 4. CARGA DE DATOS Y SIDEBAR ---
 pw_clean = get_historical_data()
 
-# --- 5. BARRA LATERAL (SIDEBAR) ---
 with st.sidebar:
     st.header("⚙️ Configuración")
-    fecha_inicio_proy = st.date_input("Proyectar 30 días desde:", datetime.now())
+    fecha_inicio_proy = st.date_input("Proyectar desde:", datetime.now())
     
     st.divider()
+    st.write("**Ajuste de Conservadurismo**")
+    # Este slider permite bajar ese total de 9.4M a algo más realista
+    ajuste_sensibilidad = st.slider("Sensibilidad del Modelo (%)", 60, 100, 85) / 100
     
+    st.divider()
     if pw_clean is not None:
-        ultima_fecha_data = pw_clean.index.max()
-        st.success(f"✅ Datos cargados hasta: {ultima_fecha_data.strftime('%d/%m/%Y')}")
-    else:
-        st.error("❌ No se encontró 'ventas_historicas.csv'")
+        ultima_fecha = pw_clean.index.max()
+        st.success(f"✅ Datos cargados hasta: {ultima_fecha.strftime('%d/%m/%Y')}")
     
     btn_calcular = st.button("🚀 Calcular Proyección", use_container_width=True)
 
-# --- 6. LÓGICA DE PROYECCIÓN Y MÉTRICAS ---
-if btn_calcular:
-    if pw_clean is not None:
-        with st.spinner("Entrenando modelo con ventas reales..."):
+# --- 5. LÓGICA DE PROYECCIÓN ---
+if btn_calcular and pw_clean is not None:
+    with st.spinner("Entrenando modelo y suavizando picos..."):
+        
+        # Entrenamos con días de venta real para evitar sesgo de cierre
+        df_train = create_features(pw_clean[pw_clean['MontoNeto'] > 0]).dropna()
+        features = ['dia_semana', 'dia_mes', 'es_finde', 'lag_1', 'lag_7', 'lag_30', 'rolling_mean_7']
+        
+        # XGBoost con profundidad limitada para evitar sobreajuste (overfitting)
+        model = xgb.XGBRegressor(n_estimators=400, learning_rate=0.04, max_depth=5, subsample=0.8)
+        model.fit(df_train[features], df_train['MontoNeto'])
+
+        # Techo de venta diario (Percentil 90) para que un pico no infle el mes
+        techo_diario = pw_clean['MontoNeto'][pw_clean['MontoNeto'] > 0].quantile(0.90)
+
+        df_loop = pw_clean.copy()
+        results = []
+        current_date = pd.Timestamp(fecha_inicio_proy)
+        
+        for _ in range(30):
+            df_loop.loc[current_date, 'MontoNeto'] = 0
+            df_with_features = create_features(df_loop)
+            X_input = df_with_features.loc[[current_date], features]
             
-            # Entrenamiento rápido: filtramos ceros para que la proyección sea realista
-            df_train = create_features(pw_clean[pw_clean['MontoNeto'] > 0]).dropna()
-            features_cols = ['dia_semana', 'dia_mes', 'mes', 'es_finde', 'lag_1', 'lag_7', 'lag_14', 'lag_30', 'rolling_mean_7']
+            pred = float(model.predict(X_input)[0])
             
-            model = xgb.XGBRegressor(n_estimators=500, learning_rate=0.05, max_depth=6, random_state=42)
-            model.fit(df_train[features_cols], df_train['MontoNeto'])
-
-            # --- CÁLCULO DE VENTA ACUMULADA ---
-            fecha_inicio_dt = pd.to_datetime(fecha_inicio_proy)
-            mask_acumulado = (pw_clean.index >= fecha_inicio_dt) & (pw_clean.index <= ultima_fecha_data)
-            venta_acumulada_real = pw_clean.loc[mask_acumulado, 'MontoNeto'].sum()
-
-            # --- GENERACIÓN DE PROYECCIÓN ---
-            df_loop = pw_clean.copy()
-            results = []
-            current_date = pd.Timestamp(fecha_inicio_proy)
+            # Aplicación de frenos y ajustes
+            pred = pred * ajuste_sensibilidad
+            pred = min(pred, techo_diario)
+            pred = max(0, pred)
             
-            for _ in range(30):
-                df_loop.loc[current_date, 'MontoNeto'] = 0
-                df_with_features = create_features(df_loop)
-                X_input = df_with_features.loc[[current_date], features_cols]
-                
-                pred = model.predict(X_input)[0]
-                pred = max(0, float(pred)) 
-                
-                df_loop.loc[current_date, 'MontoNeto'] = pred
-                results.append({
-                    'Fecha': current_date.strftime('%Y-%m-%d'),
-                    'Venta Proyectada': pred
-                })
-                current_date += timedelta(days=1)
-            
-            df_res = pd.DataFrame(results)
-            total_30d_proy = df_res['Venta Proyectada'].sum()
+            df_loop.loc[current_date, 'MontoNeto'] = pred
+            results.append({
+                'Fecha': current_date.strftime('%Y-%m-%d'),
+                'Venta Proyectada': pred
+            })
+            current_date += timedelta(days=1)
+        
+        df_res = pd.DataFrame(results)
+        total_proyectado = df_res['Venta Proyectada'].sum()
 
-            # Lógica Promedio Q1
-            ventas_positivas = df_res[df_res['Venta Proyectada'] > 0]['Venta Proyectada']
-            q1 = np.percentile(ventas_positivas, 25) if not ventas_positivas.empty else 0
-            promedio_ajustado = ventas_positivas[ventas_positivas > q1].mean() if not ventas_positivas.empty else 0
+        # --- 6. VISUALIZACIÓN ---
+        m1, m2, m3, m4 = st.columns(4)
+        with m1: st.metric("💰 TOTAL PROYECTADO", f"${total_proyectado:,.2f}")
+        with m2: st.metric("📊 PROM. DIARIO", f"${df_res['Venta Proyectada'].mean():,.2f}")
+        with m3: st.metric("📅 PERIODO", "30 Días")
+        with m4: st.metric("🛑 TOPE DIARIO", f"${techo_diario:,.2f}")
 
-            # --- VISUALIZACIÓN DE MÉTRICAS ---
-            m1, m2, m3, m4 = st.columns(4)
-            with m1:
-                st.metric("📈 VENTA ACUMULADA", f"${venta_acumulada_real:,.2f}")
-            with m2:
-                st.metric("💰 TOTAL PROYECTADO", f"${total_30d_proy:,.2f}")
-            with m3:
-                st.metric("📅 PERIODO", "30 Días")
-            with m4:
-                st.metric("📊 PROM. DIARIO (Q1)", f"${promedio_ajustado:,.2f}")
+        # Gráfico de tendencia
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_res['Fecha'], y=df_res['Venta Proyectada'],
+            mode='lines+markers', line=dict(color='#FF4B4B', width=3),
+            fill='tozeroy', fillcolor='rgba(255, 75, 75, 0.1)', name="Proyección"
+        ))
+        fig.update_layout(
+            template="plotly_white", 
+            xaxis_title="Marzo 2026", 
+            yaxis_title="Monto Neto ($)",
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-            # Gráfico de tendencia
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=df_res['Fecha'], y=df_res['Venta Proyectada'],
-                mode='lines+markers', line=dict(color='#FF4B4B', width=3),
-                fill='tozeroy', fillcolor='rgba(255, 75, 75, 0.1)', name="Proyección"
-            ))
-            fig.update_layout(template="plotly_white", xaxis_title="Fecha", yaxis_title="Monto ($)", hovermode="x unified")
-            st.plotly_chart(fig, use_container_width=True)
+        st.subheader("📋 Detalle Diario")
+        st.dataframe(df_res.style.format({'Venta Proyectada': '${:,.2f}'}), use_container_width=True)
 
-            st.subheader("📋 Detalle Diario Proyectado")
-            st.dataframe(df_res.style.format({'Venta Proyectada': '${:,.2f}'}), use_container_width=True)
-            
-    else:
-        st.error("Error: Sube el archivo 'ventas_historicas.csv' a la misma carpeta de este script.")
-else:
-    st.info("💡 Haz clic en 'Calcular Proyección' para procesar los datos actuales.")
+elif btn_calcular:
+    st.error("No se pudo cargar el archivo ventas_historicas.csv")
 
 st.divider()
 st.caption(f"© {datetime.now().year} | Suministros 1979 C.A. | Usuario: JBARCENAS")
