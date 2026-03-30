@@ -81,7 +81,7 @@ with st.sidebar:
         ultima_fecha = pw_clean.index.max()
         st.success(f"✅ Datos hasta: {ultima_fecha.strftime('%d/%m/%Y')}")
     
-    btn_calcular = st.button("🚀 Calcular Proyección", use_container_width=True)
+    btn_calcular = st.button("Calcular Proyección", use_container_width=True)
 
 # --- 5. CÁLCULOS ---
 if btn_calcular and pw_clean is not None:
