@@ -3,7 +3,7 @@ from sqlalchemy import create_engine, text
 from urllib.parse import quote_plus
 import os
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN --
 SERVER = "192.168.150.6,2431"
 UID, PWD = "Jbarcenas", "Juanbarcenas2020" # Asegúrate de que sean correctas
 DB_PRINCIPAL = "EnterpriseAdminDb"
