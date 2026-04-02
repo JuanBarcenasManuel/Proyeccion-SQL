@@ -145,5 +145,5 @@ if btn_calcular and pw_clean is not None:
         st.dataframe(df_final.set_index('Fecha').style.format('${:,.2f}'), use_container_width=True)
 
 st.divider()
-st.caption(f"© {datetime.now().year} | Suministros 1979 C.A. | Usuario: DEPARTEMANETO DE CADENAS DE SUMINISTROS")
+st.caption(f"© {datetime.now().year} | Suministros 1979 C.A. | Usuario: Departamento de Cadena de Suministros")
 
