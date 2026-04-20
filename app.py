@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import os
 from PIL import Image
 
-# --- 1. CONFIGURACIÓN DE PÁGINA ----
+# --- 1. CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
     page_title="Predicción Ventas | Suministros 1979",
     layout="wide"
