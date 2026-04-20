@@ -17,7 +17,7 @@ ruta_base = os.path.dirname(__file__)
 ruta_logo = os.path.join(ruta_base, 'Suministros.jpg')
 ruta_datos = os.path.join(ruta_base, 'ventas_historicas.csv')
 
-# Estilo para tarjetas de métricas
+# Estilo para tarjetas de métrica
 st.markdown("""
     <style>
     .stMetric { 
